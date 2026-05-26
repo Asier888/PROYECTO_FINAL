@@ -1,0 +1,20 @@
+# Mage y datos temporales
+.mage_data/
+mage_data/
+__pycache__/
+*.pyc
+
+# Datos del CSV
+data/*.csv
+
+# Docker y volúmenes locales
+.elasticsearch_data/
+elasticsearch_data/
+.rabbitmq_data/
+
+# Configuración de entornos virtuales o IDEs
+.venv/
+venv/
+.vscode/
+.cursor/
+.env

@@ -1,0 +1,26 @@
+{
+  "mappings": {
+    "properties": {
+      "date": {
+        "type": "date",
+        "format": "strict_date_optional_time||yyyy-MM-dd"
+      },
+      "country": { "type": "keyword" },
+      "avg_temperature": { "type": "float" },
+      "humidity": { "type": "float" },
+      "co2_emission": { "type": "float" },
+      "energy_consumption": { "type": "float" },
+      "renewable_share": { "type": "float" },
+      "urban_population": { "type": "float" },
+      "industrial_activity_index": { "type": "float" },
+      "energy_price": { "type": "float" },
+      "pvpc_esios": { "type": "float" },
+      "potential_savings": { "type": "float" },
+      "esios_timestamp": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "alert_high_consumption_price": { "type": "boolean" }
+    }
+  }
+}

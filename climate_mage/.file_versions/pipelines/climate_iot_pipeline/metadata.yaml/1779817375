@@ -1,0 +1,77 @@
+blocks:
+- all_upstream_blocks_executed: true
+  color: null
+  configuration: {}
+  downstream_blocks:
+  - esios_enrichment_consumer
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: sensor_capture_producer
+  retry_config: null
+  status: failed
+  timeout: null
+  type: data_loader
+  upstream_blocks: []
+  uuid: sensor_capture_producer
+- all_upstream_blocks_executed: false
+  color: null
+  configuration: {}
+  downstream_blocks:
+  - elasticsearch_exporter
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: esios_enrichment_consumer
+  retry_config: null
+  status: not_executed
+  timeout: null
+  type: transformer
+  upstream_blocks:
+  - sensor_capture_producer
+  uuid: esios_enrichment_consumer
+- all_upstream_blocks_executed: false
+  color: null
+  configuration: {}
+  downstream_blocks: []
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: elasticsearch_exporter
+  retry_config: null
+  status: not_executed
+  timeout: null
+  type: data_exporter
+  upstream_blocks:
+  - esios_enrichment_consumer
+  uuid: elasticsearch_exporter
+cache_block_output_in_memory: false
+callbacks: []
+concurrency_config: {}
+conditionals: []
+created_at: null
+data_integration: null
+description: Pipeline IoT clima-energía con RabbitMQ, ESIOS y Elasticsearch
+executor_config: {}
+executor_count: 1
+executor_type: null
+extensions: {}
+name: climate_iot_pipeline
+notification_config: {}
+remote_variables_dir: null
+retry_config: {}
+run_pipeline_in_one_process: false
+settings:
+  triggers: null
+spark_config: {}
+tags:
+- iot
+- rabbitmq
+- esios
+type: python
+uuid: climate_iot_pipeline
+variables_dir: /home/src/mage_data/climate_mage
+widgets: []

@@ -1,0 +1,59 @@
+# Despliegue AZURE: Mage.ai + RabbitMQ conectados a Elasticsearch en Elastic Cloud
+# Uso: docker compose -f docker-compose.azure.yml --env-file .env up -d
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: iot-rabbitmq-azure
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq_data_azure:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iot-azure-net
+
+  mage:
+    image: mageai/mageai:latest
+    container_name: iot-mage-azure
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "6789:6789"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/home/src
+      - MAGE_DATA_DIR=/home/src/mage_data
+      # Elasticsearch en Azure (Elastic Cloud) — configurar en .env
+      - ELASTICSEARCH_CLOUD_ID=${ELASTICSEARCH_CLOUD_ID}
+      - ELASTICSEARCH_API_KEY=${ELASTICSEARCH_API_KEY}
+      - ELASTICSEARCH_HOSTS=${ELASTICSEARCH_HOSTS}
+      - ELASTICSEARCH_INDEX=${ELASTICSEARCH_INDEX:-climate_energy_iot}
+    volumes:
+      - ./climate_mage:/home/src/climate_mage
+      - ./data:/home/src/data
+      - ./climate_mage/requirements.txt:/home/src/requirements.txt
+      - mage_data_azure:/home/src/mage_data
+    working_dir: /home/src
+    command: >
+      bash -c "pip install -q -r /home/src/requirements.txt &&
+               mage start climate_mage --host 0.0.0.0 --port 6789"
+    networks:
+      - iot-azure-net
+
+volumes:
+  rabbitmq_data_azure:
+  mage_data_azure:
+
+networks:
+  iot-azure-net:
+    driver: bridge

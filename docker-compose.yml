@@ -1,0 +1,76 @@
+# Despliegue LOCAL: Mage.ai + RabbitMQ + Elasticsearch + Kibana
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: iot-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - iot-net
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: iot-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - iot-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.2
+    container_name: iot-kibana
+    depends_on:
+      - elasticsearch
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+    networks:
+      - iot-net
+
+  mage:
+    image: mageai/mageai:latest
+    container_name: iot-mage
+    depends_on:
+      - rabbitmq
+      - elasticsearch
+    ports:
+      - "6789:6789"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/home/src
+      - MAGE_DATA_DIR=/home/src/mage_data
+    volumes:
+      - ./climate_mage:/home/src/climate_mage
+      - ./data:/home/src/data
+      - ./climate_mage/requirements.txt:/home/src/requirements.txt
+      - mage_data:/home/src/mage_data
+    working_dir: /home/src
+    command: >
+      bash -c "pip install -q -r /home/src/requirements.txt &&
+               mage start climate_mage --host 0.0.0.0 --port 6789"
+    networks:
+      - iot-net
+
+volumes:
+  rabbitmq_data:
+  es_data:
+  mage_data:
+
+networks:
+  iot-net:
+    driver: bridge
