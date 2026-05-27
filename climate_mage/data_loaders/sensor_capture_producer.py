@@ -1,13 +1,7 @@
-"""
-Bloque Data Loader (Productor): simula captura IoT leyendo el CSV
-fila a fila cada N segundos y publica JSON en RabbitMQ (topic exchange).
-"""
-
 import os
 import sys
-import time
+from datetime import datetime  # Crucial para el tiempo real en Kibana
 from pathlib import Path
-
 import pandas as pd
 
 if "data_loader" not in globals():
@@ -15,7 +9,7 @@ if "data_loader" not in globals():
 if "test" not in globals():
     from mage_ai.data_preparation.decorators import test
 
-# Añadir raíz del proyecto Mage al path (Corregido para entornos interactivos de Mage)
+# Añadir raíz del proyecto Mage al path
 _PROJECT_ROOT = Path("/home/src")
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -27,19 +21,13 @@ from climate_mage.utils.rabbitmq_client import publish_record
 @data_loader
 def load_and_publish_to_rabbitmq(*args, **kwargs) -> pd.DataFrame:
     """
-    Lee global_climate_energy_2020_2024.csv y publica cada fila en RabbitMQ.
-    Devuelve un resumen de la captura para el bloque downstream.
+    Lee el CSV y publica una ráfaga limpia con la hora exacta actual en RabbitMQ.
     """
     csv_path = os.getenv(
         "CSV_SOURCE_PATH",
         "/home/src/data/global_climate_energy_2020_2024.csv",
     )
-    interval = int(os.getenv("SENSOR_CAPTURE_INTERVAL_SECONDS", "10"))
-    max_rows = int(os.getenv("SENSOR_MAX_ROWS", "0"))  # 0 = todas las filas
-
-    published = 0
-    errors = 0
-    preview_rows = []
+    max_rows = 100  # Envía 100 registros de golpe para pintar las líneas del tirón
 
     try:
         df = pd.read_csv(csv_path)
@@ -51,44 +39,35 @@ def load_and_publish_to_rabbitmq(*args, **kwargs) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Columnas faltantes en CSV: {missing}")
 
+    print(f"[⚙️ Sistema] Generando ráfaga de {max_rows} mensajes con marcas de tiempo actualizadas...")
+
+    published = 0
+    records_enviados = []
+
     for idx, row in df.iterrows():
-        if max_rows and published >= max_rows:
+        if published >= max_rows:
             break
 
         raw = row[columns].to_dict()
         record = coerce_record(raw)
 
+        # 🎯 SOLUCIÓN AL GRÁFICO VACÍO: Estampa Año-Mes-Día + Hora:Minuto:Segundo UTC (Zulu)
+        fecha_real_utc = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        record['date'] = fecha_real_utc
+
         try:
             publish_record(record)
             published += 1
-            if len(preview_rows) < 5:
-                preview_rows.append(record)
-            print(
-                f"[Captura] Publicado registro {published}: "
-                f"{record['date']} | {record['country']} | "
-                f"energy_consumption={record['energy_consumption']}"
-            )
-        except ConnectionError as exc:
-            errors += 1
-            print(f"[Captura] Error RabbitMQ fila {idx}: {exc}")
+            records_enviados.append(record)
+        except Exception as exc:
+            print(f"[❌] Error RabbitMQ en fila {idx}: {exc}")
 
-        time.sleep(interval)
-
-    summary = pd.DataFrame(
-        [
-            {
-                "status": "completed",
-                "published": published,
-                "errors": errors,
-                "interval_seconds": interval,
-                "mapping": str(RECORD_FIELD_MAPPING),
-            }
-        ]
-    )
-    return summary
+    print(f"[🚀 Éxito] Ráfaga completada: {published} mensajes enviados a RabbitMQ.")
+    
+    # Devolvemos el DataFrame de lo que se acaba de enviar para el histórico de Mage
+    return pd.DataFrame(records_enviados)
 
 
 @test
 def test_output(output, *args) -> None:
     assert output is not None
-    assert "published" in output.columns
