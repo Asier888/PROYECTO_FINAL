@@ -1,5 +1,5 @@
 """
-Bloque Data Exporter: persiste DataFrame enriquecido directamente en Elasticsearch.
+Bloque Data Exporter: persiste DataFrame enriquecido directamente en Elasticsearch (Local o Azure).
 """
 
 import os
@@ -22,17 +22,29 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 @data_exporter
 def export_to_elasticsearch(data: pd.DataFrame, *args, **kwargs) -> None:
-    """Envía las filas limpias y enriquecidas directamente a Elasticsearch."""
+    """Envía las filas limpias y enriquecidas directamente a Elasticsearch (Local o Azure Cloud)."""
     if data is None or data.empty:
         print("[Exporter] Sin datos para exportar.")
         return
 
-    # Configuraciones del índice e historial
-    index_name = os.getenv("ELASTICSEARCH_INDEX", "climate_iot_data")
-    es_host = os.getenv("ELASTICSEARCH_HOST", "http://elasticsearch:9200")
+    index_name = os.getenv("ELASTICSEARCH_INDEX", "climate_energy_iot")
+    
+    # Intentar obtener credenciales de Azure desde las variables de entorno
+    cloud_id = os.getenv("ELASTICSEARCH_CLOUD_ID")
+    api_key = os.getenv("ELASTICSEARCH_API_KEY")
 
-    print(f"[Exporter] Conectando a Elasticsearch en {es_host}...")
-    es = Elasticsearch([es_host])
+    if cloud_id and api_key:
+        # --- CONEXIÓN A AZURE CLOUD ---
+        print("[Exporter] Detectadas variables de Azure Cloud. Conectando a Elastic Cloud en Azure...")
+        es = Elasticsearch(
+            cloud_id=cloud_id,
+            api_key=api_key
+        )
+    else:
+        # --- CONEXIÓN LOCAL POR DEFECTO ---
+        es_host = os.getenv("ELASTICSEARCH_HOSTS", "http://elasticsearch:9200")
+        print(f"[Exporter] Conectando a Elasticsearch Local en {es_host}...")
+        es = Elasticsearch([es_host])
 
     # Generar las acciones en lote (bulk) para optimizar la inserción
     actions = []
@@ -65,7 +77,7 @@ def export_to_elasticsearch(data: pd.DataFrame, *args, **kwargs) -> None:
     try:
         # Inserción masiva ultra rápida
         success, errors = helpers.bulk(es, actions)
-        print(f"[Exporter] ¡Éxito! Indexados correctamente {success} documentos en el índice '{index_name}'.")
+        print(f"[Exporter] ¡Éxito! Indexados correctamente {success} documentos en Azure de forma remota.")
         if errors:
             print(f"[Exporter] Alerta, hubo algunos errores: {errors}")
     except Exception as e:
