@@ -1,6 +1,8 @@
 # Pipeline IoT Clima-Energía
 
-Simulación de captura de sensores en tiempo real, procesamiento ETL con **Mage.ai** y **RabbitMQ**, enriquecimiento con la API **ESIOS** (PVPC, indicador 1001) y persistencia en **Elasticsearch** (local o Azure) con visualización en **Kibana**.
+
+Pipeline de datos IoT de extremo a extremo que simula la captura de sensores climáticos y energéticos, procesa los registros mediante un flujo ETL orquestado en **Mage.ai**, los enriquece con el precio de la electricidad en tiempo real (**API ESIOS**) y los persiste en **Elasticsearch** para su visualización en **Kibana**. El despliegue está dockerizado para entorno local y soporta **Azure Elastic Cloud** como destino en la nube.
+
 
 ## Arquitectura
 
@@ -39,14 +41,41 @@ iot-climate-pipeline/
 
 ## Pasos seguidos en el desarrollo
 
-1. **Dataset**: Definición de columnas clave y generación de CSV de ejemplo (`date`, `country`, `avg_temperature`, etc.).
-2. **Infraestructura**: `docker-compose.yml` con Mage.ai (6789), RabbitMQ (5672 / management 15672), Elasticsearch y Kibana.
-3. **Message broker**: Exchange tipo `topic` (`climate.iot`) con routing key `sensor.record`.
-4. **Bloque productor**: Lectura fila a fila con intervalo configurable (10 s por defecto) y publicación JSON con mapping explícito de tipos.
-5. **Bloque transformador**: Consumo de cola, limpieza Pandas (nulos + outliers), llamada ESIOS y cálculo de `potential_savings`.
-6. **Bloque exportador**: Carga a Elasticsearch con mapping (`date` → date, `energy_consumption` → float).
-7. **Azure**: Scripts CLI para Elastic Cloud y compose separado sin ES local.
-8. **Kibana**: Documentación de 3 visualizaciones y regla de alertas.
+### 1. Definición del dataset y columnas clave
+Se partió del CSV `global_climate_energy_2020_2024.csv` con registros históricos de múltiples países. Se identificaron las columnas relevantes para el pipeline (`date`, `country`, `avg_temperature`, `humidity`, `co2_emission`, `energy_consumption`, `renewable_share`, `urban_population`, `industrial_activity_index`, `energy_price`) y se definió el mapping de tipos en `utils/field_mapping.py` para garantizar coherencia desde la publicación hasta la indexación.
+
+### 2. Infraestructura con Docker Compose
+Se creó `docker-compose.yml` con cuatro servicios en red interna:
+- **mage** (puerto 6789): orquestador del pipeline
+- **rabbitmq** (5672 / management 15672): message broker AMQP
+- **elasticsearch** (9200): almacén y motor de búsqueda
+- **kibana** (5601): visualización y alertas
+
+Los servicios se comunican por nombre de contenedor (`rabbitmq`, `elasticsearch`), eliminando dependencias de IP. Las credenciales se gestionan mediante `.env`.
+
+### 3. Message broker: topología RabbitMQ
+Se configuró un exchange de tipo `topic` llamado `climate.iot` con una cola durable `climate.sensor.records` y la routing key `sensor.record`. La durabilidad de la cola y el `delivery_mode=2` en los mensajes garantizan que los registros sobreviven a un reinicio del broker.
+
+### 4. Bloque productor: `sensor_capture_producer.py`
+Lee el CSV fila a fila con `pandas.read_csv()`, aplica `coerce_record()` para forzar los tipos definidos en `field_mapping.py`, y publica cada registro como JSON en RabbitMQ mediante `utils/rabbitmq_client.py`. Entre publicaciones espera `SENSOR_CAPTURE_INTERVAL_SECONDS` (10 s por defecto) para simular la frecuencia de un sensor físico. La variable `SENSOR_MAX_ROWS` permite limitar el número de filas en pruebas.
+
+### 5. Bloque transformador: `esios_enrichment_consumer.py`
+Implementa las tres fases del ETL:
+1. **Extracción**: consume la cola con `pika.basic_get()` en bucle hasta vaciarla o alcanzar `RABBITMQ_CONSUME_TIMEOUT_SECONDS`.
+2. **Transformación**: construye un DataFrame Pandas, elimina nulos con `dropna()`, trata outliers en `energy_consumption` y normaliza tipos con `utils/data_cleaning.py`.
+3. **Enriquecimiento**: consulta la API ESIOS (indicador 1001) para obtener el precio PVPC y calcula los campos derivados:
+   - `energy_price_eur_kwh`: precio de la electricidad (€/kWh)
+   - `energy_cost_eur`: consumo × precio
+   - `potential_savings_eur`: coste × 15 % (ahorro estimado con eficiencia energética)
+
+### 6. Bloque exportador: `elasticsearch_exporter.py`
+Recibe el DataFrame enriquecido y lo carga en Elasticsearch mediante `helpers.bulk()`, convirtiendo previamente los tipos NumPy a tipos Python nativos para evitar errores de serialización. El índice `climate_energy_iot` se crea previamente con `scripts/setup_elasticsearch_index.py` usando el mapping de `config/elasticsearch_mapping.json`.
+
+### 7. Despliegue en Azure
+Se creó `docker-compose.azure.yml` que elimina los contenedores locales de Elasticsearch y Kibana y apunta al cluster de **Elastic Cloud**. Los scripts `azure_deploy_elasticsearch.ps1` / `.sh` automatizan la creación del deployment mediante el Azure Resource Provider de Elastic. La autenticación cambia de usuario/contraseña a `ELASTICSEARCH_CLOUD_ID` + `ELASTICSEARCH_API_KEY`.
+
+### 8. Visualización en Kibana
+Se documentaron en `kibana/KIBANA_DASHBOARD.md` tres visualizaciones principales y una regla de alerta, que se detallan en la sección de [Visualización](#6-visualización-kibana).
 
 ## Checklist del flujo final
 
@@ -70,29 +99,38 @@ iot-climate-pipeline/
 
 ### 2. Configuración
 
-```powershell
-cd iot-climate-pipeline
-copy .env.example .env
-# Editar .env: ESIOS_API_KEY, contraseñas, etc.
+```bash
+cp .env.example .env          # Linux / Mac
+copy .env.example .env        # Windows
 ```
 
-Para pruebas rápidas, `SENSOR_MAX_ROWS=5` limita filas publicadas (el loader sigue esperando 10 s entre filas).
+Editar `.env` y completar al menos:
+
+```env
+ESIOS_API_KEY=tu_token_esios_aqui
+ELASTICSEARCH_PASSWORD=una_contraseña_segura
+```
+
+Para pruebas rápidas, dejar `SENSOR_MAX_ROWS=5` (publica solo 5 filas; con el intervalo de 10 s el loader tarda ~50 s).
 
 ### 3. Despliegue local
 
-```powershell
+```bash
+# Levantar todos los servicios
 docker compose --env-file .env up -d
+
+# Crear el índice con el mapping correcto (ejecutar una sola vez)
 python scripts/setup_elasticsearch_index.py
 ```
 
-Servicios:
+Servicios disponibles tras el arranque:
 
-| Servicio | URL |
-|----------|-----|
-| Mage.ai | http://localhost:6789 |
-| RabbitMQ Management | http://localhost:15672 (guest/guest) |
-| Elasticsearch | http://localhost:9200 |
-| Kibana | http://localhost:5601 |
+| Servicio | URL | Credenciales |
+|---|---|---|
+| Mage.ai | http://localhost:6789 | — |
+| RabbitMQ Management | http://localhost:15672 | guest / guest |
+| Elasticsearch | http://localhost:9200 | elastic / `ELASTICSEARCH_PASSWORD` |
+| Kibana | http://localhost:5601 | elastic / `ELASTICSEARCH_PASSWORD` |
 
 ### 4. Ejecutar el pipeline en Mage
 
@@ -131,50 +169,57 @@ Seguir `kibana/KIBANA_DASHBOARD.md` para:
 
 ## Variables de entorno principales
 
-| Variable | Descripción |
-|----------|-------------|
-| `SENSOR_CAPTURE_INTERVAL_SECONDS` | Intervalo simulación IoT (default: 10) |
-| `ESIOS_API_KEY` | Token API Red Eléctrica |
-| `ESIOS_INDICATOR_ID` | 1001 (PVPC según especificación) |
-| `RABBITMQ_*` | Conexión y topología del broker |
-| `ELASTICSEARCH_*` | Host local o Cloud ID + API Key (Azure) |
+| Variable | Default | Descripción |
+|---|---|---|
+| `CSV_SOURCE_PATH` | `/home/src/data/…` | Ruta al CSV dentro del contenedor Mage |
+| `SENSOR_CAPTURE_INTERVAL_SECONDS` | `10` | Pausa entre publicaciones (simula frecuencia de sensor) |
+| `SENSOR_MAX_ROWS` | `5` | Límite de filas publicadas (0 = sin límite) |
+| `ESIOS_API_KEY` | — | Token de autenticación API ESIOS |
+| `ESIOS_INDICATOR_ID` | `1001` | Indicador PVPC a consultar |
+| `RABBITMQ_CONSUME_TIMEOUT_SECONDS` | `120` | Tiempo máximo de drenado de cola |
+| `ELASTICSEARCH_HOSTS` | `http://elasticsearch:9200` | Host local o URL Elastic Cloud |
+| `ELASTICSEARCH_INDEX` | `climate_energy_iot` | Nombre del índice |
+| `ELASTICSEARCH_CLOUD_ID` | — | Cloud ID para Azure Elastic Cloud |
+| `ELASTICSEARCH_API_KEY` | — | API Key para Azure Elastic Cloud |
+
+---
+
+## Problemas / Retos encontrados
+
+| Reto | Enfoque adoptado |
+|---|---|
+| Mage ejecuta bloques en secuencia, impidiendo paralelismo productor-consumidor | El loader publica toda la cola y termina. El transformer drena con `basic_get()` en bucle con timeout configurable (`RABBITMQ_CONSUME_TIMEOUT_SECONDS`). |
+| Simulación lenta: 10 s × muchas filas hace las pruebas inviables | Variable `SENSOR_MAX_ROWS` para limitar filas durante el desarrollo. En producción se reduciría el intervalo. |
+| API ESIOS requiere token y puede fallar por red o cuota | Bloque `try/except` en `utils/esios_client.py`: si la API falla, el pipeline continúa con el precio fijo predefinido y registra el error. |
+| Precio ESIOS en €/MWh, consumo en kWh | Conversión `/1000` aplicada en el cliente ESIOS para trabajar en unidades coherentes con el campo `energy_consumption`. |
+| Tipos NumPy de pandas no serializables por `elasticsearch-py` | Conversión explícita a tipos Python nativos (`str`, `float`, `int`) antes de construir los documentos para `helpers.bulk()`. |
+| Elasticsearch 8.x activa seguridad por defecto (TLS, autenticación) | Usuario `elastic` con contraseña en el compose local; `CLOUD_ID` + `API_KEY` en Azure. El cliente detecta el modo según variables presentes. |
 
 ---
 
 ## Posibles vías de mejora
 
-- **Streaming real**: Separar productor y consumidor en procesos/containers independientes con ejecución continua.
-- **Indicador ESIOS**: Validar si el proyecto debe usar 600 (PVPC oficial) vs. 1001 (especificación del enunciado).
-- **Batching**: Publicar/consumir en lotes para reducir latencia y llamadas API.
-- **Idempotencia**: Claves de documento deterministas y upserts en Elasticsearch.
-- **Observabilidad**: Métricas Prometheus + trazas OpenTelemetry en Mage.
-- **CI/CD**: Pipeline GitHub Actions que levante compose y ejecute tests de integración.
-- **Seguridad**: TLS en RabbitMQ, rotación de API keys y secrets en Azure Key Vault.
-
----
-
-## Problemas y retos encontrados
-
-| Reto | Enfoque adoptado |
-|------|------------------|
-| Mage ejecuta bloques en secuencia | El loader publica en cola; el transformer drena la cola con timeout |
-| Simulación 10 s × muchas filas | Variable `SENSOR_MAX_ROWS` para pruebas |
-| API ESIOS requiere token | Manejo try/except; registro continúa sin PVPC si falla |
-| Unidades precio (€/MWh vs €/kWh) | Conversión `/1000` en cliente ESIOS |
-| Elasticsearch 8.x seguridad | Usuario `elastic` + password en compose local |
+- **Streaming real**: separar productor y consumidor en microservicios independientes con ejecución continua, eliminando la limitación de la secuencialidad de Mage para este caso de uso.
+- **Batching**: publicar y consumir mensajes en lotes para reducir la latencia y el número de llamadas a la API ESIOS.
+- **Idempotencia**: usar IDs de documento deterministas en Elasticsearch (`hash(country + date)`) para permitir upserts sin duplicados en re-ejecuciones del pipeline.
+- **Indicador ESIOS**: validar si el proyecto debe usar el indicador `600` (PVPC oficial tarifa regulada) en lugar del `1001` especificado en el enunciado.
+- **Dead Letter Queue**: configurar una DLQ en RabbitMQ para los mensajes que el transformer no pueda procesar, evitando pérdida silenciosa de datos.
+- **Observabilidad**: métricas Prometheus exportadas desde Mage y RabbitMQ, con trazas OpenTelemetry para correlacionar la latencia de cada bloque.
+- **CI/CD**: pipeline GitHub Actions que levante el compose, ejecute el pipeline completo y valide que el número de documentos indexados en Elasticsearch es el esperado.
+- **Seguridad**: TLS en RabbitMQ, rotación automática de API keys y secrets mediante Azure Key Vault, y usuario de Elasticsearch con permisos acotados al índice `climate_energy_iot`.
 
 ---
 
 ## Alternativas posibles
 
-| Componente | Alternativa |
-|------------|-------------|
-| Message broker | Apache Kafka, Redis Streams, Azure Service Bus |
-| Orquestación | Apache Airflow, Prefect, Azure Data Factory |
-| Almacén | Azure Cosmos DB, TimescaleDB, InfluxDB |
-| API precios | OMIE, tarifas comercializadora, indicador 600 ESIOS |
-| Cloud ES | Azure AI Search, OpenSearch managed, self-hosted en AKS |
-| Visualización | Grafana, Power BI, Azure Monitor workbooks |
+| Componente | Usado en este proyecto | Alternativas consideradas |
+|---|---|---|
+| Orquestador ETL | Mage.ai | Apache Airflow (más maduro, mayor complejidad operativa), Prefect (decoradores similares), Azure Data Factory (serverless, sin Docker) |
+| Message broker | RabbitMQ | Apache Kafka (replay nativo, mayor throughput, mayor overhead), Redis Streams (ligero, menos garantías AMQP), Azure Service Bus (managed, sin infraestructura propia) |
+| Almacén / búsqueda | Elasticsearch | InfluxDB (series temporales puras, sin full-text), TimescaleDB (SQL con extensión temporal), Azure Cosmos DB (multi-modelo, managed) |
+| Visualización | Kibana | Grafana (agnóstico de fuente, más flexible), Power BI (integración Office 365), Azure Monitor Workbooks (sin infraestructura adicional) |
+| API precios energía | ESIOS indicador 1001 | Indicador 600 ESIOS (PVPC oficial tarifa regulada), OMIE (mercado mayorista ibérico), tarifas de comercializadora (sin API pública estándar) |
+| Cloud ES | Elastic Cloud (Azure) | OpenSearch managed en AWS, self-hosted en AKS, Azure AI Search (orientado a búsqueda semántica/vectorial, no recomendado para este caso) |
 
 ---
 
@@ -188,7 +233,3 @@ Seguir `kibana/KIBANA_DASHBOARD.md` para:
 Instaladas automáticamente al arrancar el contenedor Mage desde `requirements.txt`.
 
 ---
-
-## Licencia
-
-Proyecto educativo / demostración IoT-ETL.
