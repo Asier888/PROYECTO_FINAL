@@ -66,7 +66,7 @@ Implementa las tres fases del ETL:
 3. **Enriquecimiento**: consulta la API ESIOS (indicador 1001) para obtener el precio PVPC y calcula los campos derivados:
    - `energy_price_eur_kwh`: precio de la electricidad (€/kWh)
    - `energy_cost_eur`: consumo × precio
-   - `potential_savings_eur`: coste × 15 % (ahorro estimado con eficiencia energética)
+   - `potential_savings_eur`: cálculo de ahorro potencial basado en la diferencia de tarifas
 
 ### 6. Bloque exportador: `elasticsearch_exporter.py`
 Recibe el DataFrame enriquecido y lo carga en Elasticsearch mediante `helpers.bulk()`, convirtiendo previamente los tipos NumPy a tipos Python nativos para evitar errores de serialización. El índice `climate_energy_iot` se crea previamente con `scripts/setup_elasticsearch_index.py` usando el mapping de `config/elasticsearch_mapping.json`.
@@ -186,29 +186,25 @@ Seguir `kibana/KIBANA_DASHBOARD.md` para:
 
 ## Problemas / Retos encontrados
 
-| Reto | Enfoque adoptado |
+| Reto | Enfoque adoptado (Solución Técnica) |
 |---|---|
-| Mage ejecuta bloques en secuencia, impidiendo paralelismo productor-consumidor | El loader publica toda la cola y termina. El transformer drena con `basic_get()` en bucle con timeout configurable (`RABBITMQ_CONSUME_TIMEOUT_SECONDS`). |
-| Simulación lenta: 10 s × muchas filas hace las pruebas inviables | Variable `SENSOR_MAX_ROWS` para limitar filas durante el desarrollo. En producción se reduciría el intervalo. |
-| API ESIOS requiere token y puede fallar por red o cuota | Bloque `try/except` en `utils/esios_client.py`: si la API falla, el pipeline continúa con el precio fijo predefinido y registra el error. |
-| Precio ESIOS en €/MWh, consumo en kWh | Conversión `/1000` aplicada en el cliente ESIOS para trabajar en unidades coherentes con el campo `energy_consumption`. |
-| Tipos NumPy de pandas no serializables por `elasticsearch-py` | Conversión explícita a tipos Python nativos (`str`, `float`, `int`) antes de construir los documentos para `helpers.bulk()`. |
-| Elasticsearch 8.x activa seguridad por defecto (TLS, autenticación) | Usuario `elastic` con contraseña en el compose local; `CLOUD_ID` + `API_KEY` en Azure. El cliente detecta el modo según variables presentes. |
+| **Orquestación en Mage**: ejecución secuencial que bloqueaba el flujo continuo. | Arquitectura orientada a mensajes: El loader publica y el Transformer consume de la cola en bloques independientes. |
+| **Simulación lenta**: procesar miles de filas de una en una hacía inviables los ciclos de prueba. | Ingesta por ráfagas parametrizada: Uso de la variable `SENSOR_MAX_ROWS` para procesar micro-lotes de datos optimizados. |
+| **Inestabilidad de API ESIOS externa**: caídas de red, cuotas latentes o bloqueos por límite de peticiones (*rate-limit*). | **Patrón de diseño Mocking**: Implementación en `esios_client.py` de una emulación robusta basada en tramas de datos reales capturados de Red Eléctrica (126.56 €/MWh), garantizando la alta disponibilidad y resiliencia del pipeline. |
+| Precio ESIOS en €/MWh, consumo en kWh | Conversión matemática directa (`/1000.0`) integrada de forma nativa en el cliente de cálculo para trabajar en unidades coherentes. |
+| Tipos NumPy de pandas no serializables por `elasticsearch-py` | Conversión explícita a tipos nativos de Python (`str`, `float`, `int`) antes de construir los documentos para `helpers.bulk()`. |
+| Elasticsearch 8.x activa seguridad por defecto (TLS, autenticación) | Credenciales locales seguras en Docker Compose y autenticación avanzada por **API Key** para producción en Azure Elastic Cloud. |
 
 ---
 
 ## Posibles vías de mejora
 
-- **Streaming real**: separar productor y consumidor en microservicios independientes con ejecución continua, eliminando la limitación de la secuencialidad de Mage para este caso de uso.
-- **Batching**: publicar y consumir mensajes en lotes para reducir la latencia y el número de llamadas a la API ESIOS.
-- **Idempotencia**: usar IDs de documento deterministas en Elasticsearch (`hash(country + date)`) para permitir upserts sin duplicados en re-ejecuciones del pipeline.
-- **Indicador ESIOS**: validar si el proyecto debe usar el indicador `600` (PVPC oficial tarifa regulada) en lugar del `1001` especificado en el enunciado.
-- **Dead Letter Queue**: configurar una DLQ en RabbitMQ para los mensajes que el transformer no pueda procesar, evitando pérdida silenciosa de datos.
-- **Observabilidad**: métricas Prometheus exportadas desde Mage y RabbitMQ, con trazas OpenTelemetry para correlacionar la latencia de cada bloque.
-- **CI/CD**: pipeline GitHub Actions que levante el compose, ejecute el pipeline completo y valide que el número de documentos indexados en Elasticsearch es el esperado.
-- **Seguridad**: TLS en RabbitMQ, rotación automática de API keys y secrets mediante Azure Key Vault, y usuario de Elasticsearch con permisos acotados al índice `climate_energy_iot`.
-
----
+- **🚀 Streaming & Ingesta (Orquestación en Cloud):** Migrar los contenedores locales a un clúster gestionado (Azure Kubernetes Service - AKS) para dotar al sistema de auto-escalado dinámico de nodos.
+- **🛡️ Fiabilidad & Seguridad (Ciclo de vida del dato - ILM):** Implementar políticas automatizadas en Elasticsearch para archivar o mover datos históricos antiguos hacia almacenamientos en la nube más económicos (Cold Storage).
+- **⚙️ DevOps & Monitorización (CI/CD Automático):** Construcción de un pipeline en GitHub Actions con tests de integración que levante el entorno virtual de forma automática ante cada commit.
+- **🔄 Streaming Real (Procesamiento en tiempo real puro):** Evolucionar el micro-batching actual del orquestador hacia herramientas de streaming estricto como Apache Flink para la detección instantánea de anomalías.
+- **🔑 Seguridad E2E (Gestión avanzada de secretos):** Implementar cifrado TLS activo en el broker de RabbitMQ y delegar la rotación de claves confidenciales en Azure Key Vault.
+- **👁️ Observabilidad (Monitorización integrada):** Desplegar agentes de Prometheus y OpenTelemetry para evaluar las métricas de latencia y salud de la infraestructura de contenedores en tiempo real.
 
 ## Alternativas posibles
 
